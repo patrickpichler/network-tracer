@@ -1,0 +1,3 @@
+.PHONY: make-bpf
+make-bpf:
+	go generate ./...

@@ -34,7 +34,6 @@ type ProcFS interface {
 	fs.ReadDirFS
 	fs.ReadFileFS
 	fs.StatFS
-	fs.SubFS
 }
 
 var (

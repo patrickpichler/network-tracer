@@ -1,27 +1,23 @@
 package proc
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"patrickpichler.dev/ebpf-net-tracer/pkg/system"
-)
-
-type FDKind uint8
-
-const (
-	UnknownFDKind FDKind = iota
-	SocketFDKind
 )
 
 type Sock struct {
@@ -51,6 +47,18 @@ func (p *Proc) SnapshotProcessTree(targetPID PID) ([]Process, error) {
 		return nil, err
 	}
 
+	socks, err := p.parseSocks(targetPID)
+	if err != nil {
+		return nil, err
+	}
+
+	inodeToSock := map[uint64]Sock{}
+
+	for _, s := range socks {
+		fmt.Println("==", s)
+		inodeToSock[s.Inode] = s
+	}
+
 	// This will always overshoot with memory, but still better than not pre-allocating.
 	processes := make([]Process, 0, len(entries))
 
@@ -69,9 +77,10 @@ func (p *Proc) SnapshotProcessTree(targetPID PID) ([]Process, error) {
 			// PID 2 will always be kthreadd, which we do not care about.
 			continue
 		}
+		pidStr := pidToString(pid)
 
 		data, err := p.procFS.ReadFile(
-			filepath.Join(targetPath, pidToString(pid), "net"))
+			filepath.Join(targetPath, pidToString(pid), "stat"))
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				// A process can exit after we got the dir list. In such cases, we simply ignore it.
@@ -94,7 +103,7 @@ func (p *Proc) SnapshotProcessTree(targetPID PID) ([]Process, error) {
 
 		// The symlink will be relative to the container root, so this should work just fine. Sadly symlink-support for FS is not merged
 		// into go yet, hence we need to fall back to Readlink.
-		path, err := os.Readlink(filepath.Join(Path, targetPath, pidToString(pid), "exe"))
+		path, err := os.Readlink(filepath.Join(Path, targetPath, pidStr, "exe"))
 		if err != nil {
 			// TODO(patrick.pichler): Figure out what to do on error
 			path = ""
@@ -102,12 +111,44 @@ func (p *Proc) SnapshotProcessTree(targetPID PID) ([]Process, error) {
 
 		var cmdLine []string
 		data, err = p.procFS.ReadFile(
-			filepath.Join(targetPath, pidToString(pid), "cmdline"))
+			filepath.Join(targetPath, pidStr, "cmdline"))
 		// A process can exit after we got the dir list. Do not mess up the process tree, we will still report the process.
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		} else {
 			cmdLine = parseCmdline(data)
+		}
+
+		var socks []Sock
+
+		fds, err := p.procFS.ReadDir(filepath.Join(targetPath, pidStr, "fd"))
+		if err != nil {
+			return nil, err
+		}
+
+		for _, entry := range fds {
+			link, err := os.Readlink(filepath.Join(Path, targetPath, pidStr, "fd", entry.Name()))
+			if err != nil {
+				continue
+			}
+
+			if !strings.HasPrefix(link, "socket:[") {
+				// We are only interested in sockets.
+				continue
+			}
+
+			inoStr := link[len("socket:[") : len(link)-1]
+			ino, err := strconv.ParseUint(inoStr, 10, 64)
+			if err != nil {
+				continue
+			}
+
+			sock, found := inodeToSock[ino]
+			if !found {
+				continue
+			}
+
+			socks = append(socks, sock)
 		}
 
 		processes = append(processes, Process{
@@ -116,6 +157,7 @@ func (p *Proc) SnapshotProcessTree(targetPID PID) ([]Process, error) {
 			Args:      cmdLine,
 			StartTime: processStartTime,
 			FilePath:  path,
+			Socks:     socks,
 		})
 	}
 
@@ -132,13 +174,13 @@ func (p *Proc) parseSocks(targetPID PID) ([]Sock, error) {
 
 	var result []Sock
 
-	for _, sockType := range []string{} {
-		data, err := p.procFS.ReadFile(filepath.Join(targetPath, sockType))
+	for _, sockType := range []string{"tcp", "tcp6", "udp", "udp6"} {
+		f, err := p.procFS.Open(filepath.Join(targetPath, "net", sockType))
 		if err != nil {
-			return nil, fmt.Errorf("error cannot read sock file of type `%s`: %w", sockType, err)
+			return nil, fmt.Errorf("error cannot open sock file of type `%s`: %w", sockType, err)
 		}
 
-		socks, err := parseSocksFile(data)
+		socks, err := parseSocksFile(f)
 		if err != nil {
 			return nil, fmt.Errorf("error cannot parse sock types `%s`: %w", sockType, err)
 		}
@@ -149,17 +191,84 @@ func (p *Proc) parseSocks(targetPID PID) ([]Sock, error) {
 	return result, nil
 }
 
-func parseSocksFile(data []byte) ([]Sock, error) {
-	// TODO(patrick.pichler): implement
-	return nil, nil
-}
+func parseSocksFile(f fs.File) ([]Sock, error) {
+	s := bufio.NewScanner(f)
 
-func getFDKind(mode uint32) FDKind {
-	if mode&syscall.S_IFSOCK == syscall.S_IFSOCK {
-		return SocketFDKind
+	// The first line is the header, which we do not care about
+	_ = s.Scan()
+
+	var result []Sock
+
+	for s.Scan() {
+		data := s.Bytes()
+		fields := strings.Fields(string(data))
+
+		src, err := parseSockFileAddr(fields[1])
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse src addr `%s`: %w", fields[1], err)
+		}
+
+		dst, err := parseSockFileAddr(fields[2])
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse dst addr `%s`: %w", fields[2], err)
+		}
+
+		inode, err := strconv.ParseUint(fields[9], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse inode `%s`: %w", fields[11], err)
+		}
+
+		result = append(result, Sock{
+			Inode:  inode,
+			Local:  src,
+			Remote: dst,
+		})
 	}
 
-	return UnknownFDKind
+	return result, nil
+}
+
+func parseSockFileAddr(rawAddr string) (netip.AddrPort, error) {
+	parts := strings.SplitN(rawAddr, ":", 2)
+	if len(parts) != 2 {
+		return netip.AddrPort{}, fmt.Errorf("cannot parse `%s`: expected `2` parts but got `%d`",
+			rawAddr, len(parts))
+	}
+
+	addrData, err := hex.DecodeString(parts[0])
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+
+	var addr netip.Addr
+
+	switch len(addrData) {
+	case 4:
+		addr = netip.AddrFrom4([4]byte{
+			addrData[3], addrData[2], addrData[1], addrData[0],
+		})
+
+	case 16:
+		// The data is stored in chunks of 4 bytes ordered in big endian.
+		addr = netip.AddrFrom16([16]byte{
+			addrData[3], addrData[2], addrData[1], addrData[0],
+			addrData[7], addrData[6], addrData[5], addrData[4],
+			addrData[11], addrData[10], addrData[9], addrData[8],
+			addrData[15], addrData[14], addrData[13], addrData[12],
+		})
+
+	default:
+		return netip.AddrPort{}, fmt.Errorf("expected either 4 or 16 bytes for ip, but got %d", len(addrData))
+	}
+
+	portData, err := hex.DecodeString(parts[1])
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+
+	port := binary.BigEndian.Uint16(portData)
+
+	return netip.AddrPortFrom(addr, port), nil
 }
 
 func parseCmdline(data []byte) []string {

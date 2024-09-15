@@ -68,6 +68,9 @@ static __always_inline void record_flow(struct __sk_buff *ctx,
   if (sk == NULL) {
     return;
   }
+  sk = bpf_sk_fullsock(sk);
+  if (sk == NULL)
+    return;
 
   struct process_identity identity = {0};
   struct process_identity *socket_process_identity =
@@ -75,8 +78,20 @@ static __always_inline void record_flow(struct __sk_buff *ctx,
 
   // If the socket doesn't have an processs identity, we just fall back to
   // attribute it to a zero process.
-  if (socket_process_identity != NULL) {
-    identity = *socket_process_identity;
+  if (socket_process_identity == NULL) {
+    struct network_tuple tuple = {0};
+
+    if (!load_network_tuple(sk, &tuple)) {
+      return;
+    }
+
+    socket_process_identity =
+        bpf_map_lookup_elem(&existing_socket_identity_map, &tuple);
+    // If the socket doesn't have an processs identity, we just fall back to
+    // attribute it to a zero process.
+    if (socket_process_identity != NULL) {
+      identity = *socket_process_identity;
+    }
   }
 
   int zero = 0;
@@ -91,7 +106,7 @@ static __always_inline void record_flow(struct __sk_buff *ctx,
 
   struct ip_key key = {0};
 
-  if (!load_ip_key(&key, ctx, identity)) {
+  if (!load_ip_key(&key, sk, identity)) {
     // Something went wrong...
     bpf_printk("something went wrong...");
     return;

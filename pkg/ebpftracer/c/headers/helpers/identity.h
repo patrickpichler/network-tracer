@@ -16,40 +16,39 @@ init_process_identity(struct process_identity *identity) {
   identity->pid_start_time = task->start_time;
   bpf_get_current_comm(&identity->name, sizeof(identity->name));
 }
-
-static __always_inline bool
-load_ip_key(struct ip_key *key, struct __sk_buff *ctx,
-            struct process_identity process_identity) {
-  struct bpf_sock *sk = ctx->sk;
-  if (sk == NULL)
+static __always_inline bool load_network_tuple(struct bpf_sock *sk,
+                                               struct network_tuple *tuple) {
+  if (tuple == NULL || sk == NULL) {
     return false;
+  }
 
-  sk = bpf_sk_fullsock(sk);
-  if (sk == NULL)
-    return false;
-
-  key->process_identity = process_identity;
-  key->proto = sk->protocol;
-  key->family = sk->family;
-  key->lport = bpf_ntohs(sk->src_port);
-  key->dport = bpf_ntohs(sk->dst_port);
+  tuple->proto = sk->protocol;
+  tuple->family = sk->family;
+  tuple->lport = bpf_ntohs(sk->src_port);
+  tuple->dport = bpf_ntohs(sk->dst_port);
 
   switch (sk->family) {
   case AF_INET:
-    key->saddr = ctx->local_ip4;
-    key->daddr = ctx->remote_ip4;
+    tuple->saddr.ipv4 = sk->src_ip4;
+    tuple->daddr.ipv4 = sk->dst_ip4;
     break;
-  case AF_INET6:
-    if (bpf_probe_read_kernel(&key->saddr, sizeof(ctx->local_ip6),
-                              ctx->local_ip6) != 0)
-      return false;
-
-    if (bpf_probe_read_kernel(&key->daddr, sizeof(ctx->remote_ip6),
-                              ctx->remote_ip6) != 0)
-      return false;
-
-    break;
+  case AF_INET6: {
+    __builtin_memcpy(tuple->saddr.ipv6, sk->src_ip6, 4);
+    __builtin_memcpy(tuple->daddr.ipv6, sk->dst_ip6, 4);
+  } break;
   default:
+    return false;
+  }
+
+  return true;
+}
+
+static __always_inline bool
+load_ip_key(struct ip_key *key, struct bpf_sock *sk,
+            struct process_identity process_identity) {
+  key->process_identity = process_identity;
+
+  if (!load_network_tuple(sk, &key->tuple)) {
     return false;
   }
 

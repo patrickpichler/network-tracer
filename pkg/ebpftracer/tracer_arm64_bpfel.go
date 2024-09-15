@@ -16,12 +16,16 @@ type tracerConfig struct{ SummaryMapIndex int32 }
 
 type tracerIpKey struct {
 	ProcessIdentity tracerProcessIdentity
-	Lport           uint16
-	Dport           uint16
-	Family          uint16
-	Proto           uint32
-	Saddr           [16]byte /* uint128 */
-	Daddr           [16]byte /* uint128 */
+	Tuple           tracerNetworkTuple
+}
+
+type tracerNetworkTuple struct {
+	Lport  uint16
+	Dport  uint16
+	Family uint16
+	Proto  uint32
+	Saddr  struct{ Raw [16]uint8 }
+	Daddr  struct{ Raw [16]uint8 }
 }
 
 type tracerProcessIdentity struct {
@@ -88,9 +92,10 @@ type tracerProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tracerMapSpecs struct {
-	ConfigMap                *ebpf.MapSpec `ebpf:"config_map"`
-	SocketProcessIdentityMap *ebpf.MapSpec `ebpf:"socket_process_identity_map"`
-	SumMapBuffer             *ebpf.MapSpec `ebpf:"sum_map_buffer"`
+	ConfigMap                 *ebpf.MapSpec `ebpf:"config_map"`
+	ExistingSocketIdentityMap *ebpf.MapSpec `ebpf:"existing_socket_identity_map"`
+	SocketProcessIdentityMap  *ebpf.MapSpec `ebpf:"socket_process_identity_map"`
+	SumMapBuffer              *ebpf.MapSpec `ebpf:"sum_map_buffer"`
 }
 
 // tracerObjects contains all objects after they have been loaded into the kernel.
@@ -112,14 +117,16 @@ func (o *tracerObjects) Close() error {
 //
 // It can be passed to loadTracerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tracerMaps struct {
-	ConfigMap                *ebpf.Map `ebpf:"config_map"`
-	SocketProcessIdentityMap *ebpf.Map `ebpf:"socket_process_identity_map"`
-	SumMapBuffer             *ebpf.Map `ebpf:"sum_map_buffer"`
+	ConfigMap                 *ebpf.Map `ebpf:"config_map"`
+	ExistingSocketIdentityMap *ebpf.Map `ebpf:"existing_socket_identity_map"`
+	SocketProcessIdentityMap  *ebpf.Map `ebpf:"socket_process_identity_map"`
+	SumMapBuffer              *ebpf.Map `ebpf:"sum_map_buffer"`
 }
 
 func (m *tracerMaps) Close() error {
 	return _TracerClose(
 		m.ConfigMap,
+		m.ExistingSocketIdentityMap,
 		m.SocketProcessIdentityMap,
 		m.SumMapBuffer,
 	)

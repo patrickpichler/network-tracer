@@ -35,8 +35,9 @@ struct {
 
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
-  __type(key, __u32);
+  __uint(max_entries, 10240);
+  __type(key, struct network_tuple);
   __type(value, struct process_identity);
-} existing_socket_identity_map;
+} existing_socket_identity_map SEC(".maps");
 
 #endif // __MAPS_H__

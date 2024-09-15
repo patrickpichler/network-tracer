@@ -193,27 +193,27 @@ func (t *Tracer) RunStatLoop(ctx context.Context) error {
 					saddr netip.Addr
 				)
 
-				switch ipKey.Family {
+				switch ipKey.Tuple.Family {
 				case AFInet:
-					if ip, ok := netip.AddrFromSlice(ipKey.Saddr[:4]); ok {
+					if ip, ok := netip.AddrFromSlice(ipKey.Tuple.Saddr.Raw[:4]); ok {
 						saddr = ip
 					} else {
-						t.log.Warn("cannot parse source addr v4", slog.Any("addr", ipKey.Saddr[:4]))
+						t.log.Warn("cannot parse source addr v4", slog.Any("addr", ipKey.Tuple.Saddr.Raw[:4]))
 					}
 
-					if ip, ok := netip.AddrFromSlice(ipKey.Daddr[:4]); ok {
+					if ip, ok := netip.AddrFromSlice(ipKey.Tuple.Daddr.Raw[:4]); ok {
 						daddr = ip
 					} else {
-						t.log.Warn("cannot parse destination addr v4", slog.Any("addr", ipKey.Daddr[:4]))
+						t.log.Warn("cannot parse destination addr v4", slog.Any("addr", ipKey.Tuple.Daddr.Raw[:4]))
 					}
 				case AFInet6:
-					daddr = netip.AddrFrom16(ipKey.Daddr)
-					saddr = netip.AddrFrom16(ipKey.Saddr)
+					daddr = netip.AddrFrom16(ipKey.Tuple.Daddr.Raw)
+					saddr = netip.AddrFrom16(ipKey.Tuple.Saddr.Raw)
 				}
 
 				fmt.Printf("%s(%d): %s:%d -> %s:%d TX: %d RX: %d TX_Packets: %d RX_Packets: %d\n",
 					processName, ipKey.ProcessIdentity.Pid,
-					saddr, ipKey.Lport, daddr, ipKey.Dport,
+					saddr, ipKey.Tuple.Lport, daddr, ipKey.Tuple.Dport,
 					trafficSummary.TxBytes, trafficSummary.RxBytes,
 					trafficSummary.TxPackets, trafficSummary.RxPackets,
 				)

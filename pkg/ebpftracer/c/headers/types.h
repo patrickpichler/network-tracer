@@ -18,16 +18,27 @@ struct process_identity {
   __u8 name[TASK_COMM_LEN];
 } __attribute__((__packed__));
 
-struct ip_key {
-  struct process_identity process_identity;
+union addr {
+  __u8 raw[16];
+  __u32 ipv6[4];
+  __be32 ipv4;
+} __attribute__((__packed__));
 
+struct network_tuple {
   __u16 lport;
   __u16 dport;
   __u16 family;
   __u32 proto;
 
-  unsigned __int128 saddr;
-  unsigned __int128 daddr;
+  union addr saddr;
+  union addr daddr;
+} __attribute__((__packed__));
+
+struct ip_key {
+  struct process_identity process_identity;
+
+  struct network_tuple tuple;
+
   // In order for BTF to be generated for this struct, a dummy variable needs to
   // be created.
 } __attribute__((__packed__)) ip_key_dummy;
